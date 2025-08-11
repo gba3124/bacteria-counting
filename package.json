@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
+    "dev:watch": "WATCHPACK_POLLING=true next dev --turbopack",
+    "dev:poll": "CHOKIDAR_USEPOLLING=1 CHOKIDAR_INTERVAL=200 WATCHPACK_POLLING=true next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
