@@ -24,7 +24,8 @@ export default function Home() {
 
   // Binarization controls
   const [thresholdMode, setThresholdMode] = useState<ThresholdMode>("adaptive-gaussian");
-  const [adaptiveBlock, setAdaptiveBlock] = useState<number>(33); // odd only
+  const [adaptiveBlockMin, setAdaptiveBlockMin] = useState<number>(21); // odd only
+  const [adaptiveBlockMax, setAdaptiveBlockMax] = useState<number>(41); // odd only
   const [adaptiveC, setAdaptiveC] = useState<number>(0);
   const [fixedThresh, setFixedThresh] = useState<number>(128);
   const [invertMask, setInvertMask] = useState<boolean>(true);
@@ -80,11 +81,14 @@ export default function Home() {
     setMinArea(newMinArea);
 
     if (thresholdMode === "adaptive-mean" || thresholdMode === "adaptive-gaussian") {
-      // Block size: 41 -> 11 as sensitivity increases (more local)
-      const newBlk = ensureOdd(clamp(41 - Math.round(s * 3), 11, 81));
+      // Block size range: min shrinks with sensitivity; max = min + 12 (odd)
+      const blkMin = ensureOdd(clamp(41 - Math.round(s * 3), 11, 81));
+      let blkMax = ensureOdd(clamp(blkMin + 12, blkMin, 101));
+      if (blkMax < blkMin) blkMax = blkMin;
       // C offset: +4 -> -10 as sensitivity increases (lower threshold)
       const newC = clamp(Math.round(4 - s * 1.4), -20, 20);
-      setAdaptiveBlock(newBlk);
+      setAdaptiveBlockMin(blkMin);
+      setAdaptiveBlockMax(blkMax);
       setAdaptiveC(newC);
     } else if (thresholdMode === "fixed") {
       // Fixed threshold: 170 -> 110 as sensitivity increases (tend to include more detail)
@@ -107,7 +111,7 @@ export default function Home() {
     }, 120);
     return () => clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedUrl, isReady, minArea, effectiveRadiusPct, blurSize, morphSize, invertMask, thresholdMode, adaptiveBlock, adaptiveC, fixedThresh, useWatershed, splitStrength, useColorConsistency, colorTolerance, distType, distMask, dtThreshMode, dtThreshAbs, peakCleanupSize, wsMarkerMode, erodeKernelSize, erodeIterations]);
+  }, [selectedUrl, isReady, minArea, effectiveRadiusPct, blurSize, morphSize, invertMask, thresholdMode, adaptiveBlockMin, adaptiveBlockMax, adaptiveC, fixedThresh, useWatershed, splitStrength, useColorConsistency, colorTolerance, distType, distMask, dtThreshMode, dtThreshAbs, peakCleanupSize, wsMarkerMode, erodeKernelSize, erodeIterations]);
 
   // Revoke object URL
   useEffect(() => {
@@ -149,7 +153,7 @@ export default function Home() {
 
     // Try multiple binarization strategies
     type Candidate = { count: number; blur: number; morph: number; inv: boolean; mode: ThresholdMode; blk?: number; C?: number; fixed?: number };
-    let best: Candidate = { count: -1, blur: blurSize, morph: morphSize, inv: invertMask, mode: thresholdMode, blk: adaptiveBlock, C: adaptiveC, fixed: fixedThresh };
+    let best: Candidate = { count: -1, blur: blurSize, morph: morphSize, inv: invertMask, mode: thresholdMode, blk: adaptiveBlockMin, C: adaptiveC, fixed: fixedThresh };
 
     try {
       for (const b of tryBlurSizes) {
@@ -587,7 +591,10 @@ export default function Home() {
           setInvertMask(best.inv);
           setThresholdMode(best.mode);
           if (best.mode === "adaptive-mean" || best.mode === "adaptive-gaussian") {
-            if (typeof best.blk === "number") setAdaptiveBlock(best.blk);
+            if (typeof best.blk === "number") {
+              setAdaptiveBlockMin(Math.max(3, best.blk | 1));
+              setAdaptiveBlockMax(Math.max(3, (best.blk + 12) | 1));
+            }
             if (typeof best.C === "number") setAdaptiveC(best.C);
           } else if (best.mode === "fixed") {
             if (typeof best.fixed === "number") setFixedThresh(best.fixed);
@@ -671,8 +678,15 @@ export default function Home() {
         cv.threshold(maskedGray, thresh, fixedThresh, 255, cv.THRESH_BINARY);
       } else {
         const method = thresholdMode === "adaptive-mean" ? cv.ADAPTIVE_THRESH_MEAN_C : cv.ADAPTIVE_THRESH_GAUSSIAN_C;
-        const blk = Math.max(3, adaptiveBlock | 1);
-        cv.adaptiveThreshold(maskedGray, thresh, 255, method, cv.THRESH_BINARY, blk, adaptiveC);
+        const blkMin = Math.max(3, adaptiveBlockMin | 1);
+        const blkMax = Math.max(blkMin, adaptiveBlockMax | 1);
+        const tMin = new cv.Mat();
+        const tMax = new cv.Mat();
+        cv.adaptiveThreshold(maskedGray, tMin, 255, method, cv.THRESH_BINARY, blkMin, adaptiveC);
+        cv.adaptiveThreshold(maskedGray, tMax, 255, method, cv.THRESH_BINARY, blkMax, adaptiveC);
+        cv.bitwise_and(tMin, tMax, thresh);
+        tMin.delete();
+        tMax.delete();
       }
 
       let bin = thresh as unknown as typeof thresh;
@@ -1063,9 +1077,14 @@ export default function Home() {
               </label>
               {(thresholdMode === "adaptive-mean" || thresholdMode === "adaptive-gaussian") && (
                 <>
-                  <label className="text-sm block">區塊大小：{adaptiveBlock}
-                    <input type="range" min={3} max={101} step={2} value={adaptiveBlock} onChange={(e) => setAdaptiveBlock(parseInt(e.target.value))} className="w-full" />
-                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-sm block">區塊大小最小：{adaptiveBlockMin}
+                      <input type="range" min={3} max={99} step={2} value={adaptiveBlockMin} onChange={(e) => setAdaptiveBlockMin(parseInt(e.target.value))} className="w-full" />
+                    </label>
+                    <label className="text-sm block">區塊大小最大：{adaptiveBlockMax}
+                      <input type="range" min={adaptiveBlockMin} max={101} step={2} value={adaptiveBlockMax} onChange={(e) => setAdaptiveBlockMax(parseInt(e.target.value))} className="w-full" />
+                    </label>
+                  </div>
                   <label className="text-sm block">偏移 C：{adaptiveC}
                     <input type="range" min={-20} max={20} step={1} value={adaptiveC} onChange={(e) => setAdaptiveC(parseInt(e.target.value))} className="w-full" />
                   </label>
