@@ -111,6 +111,7 @@ interface CV {
   morphologyEx(src: Mat, dst: Mat, op: number, kernel: Mat): void;
   erode(src: Mat, dst: Mat, kernel: Mat): void;
   dilate(src: Mat, dst: Mat, kernel: Mat): void;
+  absdiff(src1: Mat, src2: Mat, dst: Mat): void;
   bitwise_or(src1: Mat, src2: Mat, dst: Mat): void;
   connectedComponentsWithStats(image: Mat, labels: Mat, stats: Mat, centroids: Mat, connectivity?: number, ltype?: number): number;
   distanceTransform(src: Mat, dst: Mat, distanceType: number, maskSize: number): void;
@@ -138,12 +139,15 @@ interface CV {
   CV_32F: number;
   MORPH_OPEN: number;
   MORPH_ELLIPSE: number;
+  MORPH_RECT: number;
   NORM_MINMAX: number;
+  DIST_L1: number;
   DIST_L2: number;
+  DIST_C: number;
   COLORMAP_JET: number;
 }
 
-interface OpenCvWasmModule {
+export interface OpenCvWasmModule {
   onRuntimeInitialized?: () => void;
 }
 
@@ -155,7 +159,3 @@ declare global {
     Module: OpenCvWasmModule;
   }
 }
-
-export {};
-
-
