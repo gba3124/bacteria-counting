@@ -18,13 +18,14 @@ export default function Home() {
   const { isReady, error } = useOpenCV();
 
   // Minimal controls
-  const [minArea, setMinArea] = useState<number>(20);
-  const [effectiveRadiusPct, setEffectiveRadiusPct] = useState<number>(90);
+  // Interpret as a 0..10 scale; mapped to pixel area internally
+  const [minArea, setMinArea] = useState<number>(0);
+  const [effectiveRadiusPct, setEffectiveRadiusPct] = useState<number>(84);
 
   // Binarization controls
-  const [thresholdMode, setThresholdMode] = useState<ThresholdMode>("otsu");
-  const [adaptiveBlock, setAdaptiveBlock] = useState<number>(17); // odd only
-  const [adaptiveC, setAdaptiveC] = useState<number>(-4);
+  const [thresholdMode, setThresholdMode] = useState<ThresholdMode>("adaptive-gaussian");
+  const [adaptiveBlock, setAdaptiveBlock] = useState<number>(33); // odd only
+  const [adaptiveC, setAdaptiveC] = useState<number>(0);
   const [fixedThresh, setFixedThresh] = useState<number>(128);
   const [invertMask, setInvertMask] = useState<boolean>(true);
 
@@ -36,13 +37,17 @@ export default function Home() {
   const [dtThreshMode, setDtThreshMode] = useState<"alpha" | "absolute">("alpha");
   const [dtThreshAbs, setDtThreshAbs] = useState<number>(100); // 0..255
   const [peakCleanupSize, setPeakCleanupSize] = useState<number>(1); // odd 1..7
+  // Watershed marker strategy
+  const [wsMarkerMode, setWsMarkerMode] = useState<"dt" | "erode">("erode");
+  const [erodeKernelSize, setErodeKernelSize] = useState<number>(5); // odd
+  const [erodeIterations, setErodeIterations] = useState<number>(2); // 1..10
 
   // Color consistency filter
   const [useColorConsistency, setUseColorConsistency] = useState<boolean>(false);
   const [colorTolerance, setColorTolerance] = useState<number>(0.35); // 0..1, hue window scale
 
   // Internal params (auto tuned or sensitivity)
-  const [blurSize, setBlurSize] = useState<number>(9); // odd
+  const [blurSize, setBlurSize] = useState<number>(7); // odd
   const [morphSize, setMorphSize] = useState<number>(5); // odd
 
   // Sensitivity master slider (0..10)
@@ -67,8 +72,8 @@ export default function Home() {
     const newBlur = ensureOdd(clamp(13 - s, 3, 13));
     // Morph: 7 -> 3 as sensitivity increases (less aggressive opening)
     const newMorph = ensureOdd(clamp(7 - Math.round(s * 0.4), 3, 9));
-    // Min area: 80 -> 5 as sensitivity increases (accept smaller colonies)
-    const newMinArea = clamp(Math.round(80 - s * 7.5), 1, 500);
+    // Min area scale (0..10): decreases with sensitivity (accept smaller colonies)
+    const newMinArea = clamp(parseFloat((5 - s * 0.4).toFixed(1)), 0, 10);
 
     setBlurSize(newBlur);
     setMorphSize(newMorph);
@@ -102,7 +107,7 @@ export default function Home() {
     }, 120);
     return () => clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedUrl, isReady, minArea, effectiveRadiusPct, blurSize, morphSize, invertMask, thresholdMode, adaptiveBlock, adaptiveC, fixedThresh, useWatershed, splitStrength, useColorConsistency, colorTolerance, distType, distMask, dtThreshMode, dtThreshAbs, peakCleanupSize]);
+  }, [selectedUrl, isReady, minArea, effectiveRadiusPct, blurSize, morphSize, invertMask, thresholdMode, adaptiveBlock, adaptiveC, fixedThresh, useWatershed, splitStrength, useColorConsistency, colorTolerance, distType, distMask, dtThreshMode, dtThreshAbs, peakCleanupSize, wsMarkerMode, erodeKernelSize, erodeIterations]);
 
   // Revoke object URL
   useEffect(() => {
@@ -193,6 +198,9 @@ export default function Home() {
         const roiRect = new cv.Rect(roiX, roiY, roiW, roiH);
         const maskedRoi = maskedGray.roi(roiRect);
 
+        // Effective area threshold (px) from UI scale
+        const minAreaPx = Math.max(1, Math.round(5 + minArea * minArea * 15));
+
         // Search over methods
         const modes: Array<{ mode: ThresholdMode; blocks?: number[]; Cs?: number[]; fixedTs?: number[] }> = [
           { mode: "otsu" },
@@ -242,9 +250,9 @@ export default function Home() {
                     const cents = new cv.Mat();
                     const n = cv.connectedComponentsWithStats(maskedInner, labels, stats, cents, 8, cv.CV_32S);
                     let countedLocal = 0;
-                    for (let i = 1; i < n; i++) {
-                      const area = stats.intPtr(i, 4)[0];
-                      if (area < minArea) continue;
+                     for (let i = 1; i < n; i++) {
+                       const area = stats.intPtr(i, 4)[0];
+                       if (area < minAreaPx) continue;
                       countedLocal++;
                     }
                     labels.delete();
@@ -311,9 +319,9 @@ export default function Home() {
                     const centsWs = new cv.Mat();
                     const nWs = cv.connectedComponentsWithStats(maskedInnerWs, labelsWs, statsWs, centsWs, 8, cv.CV_32S);
                     let countedLocalWs = 0;
-                    for (let i = 1; i < nWs; i++) {
-                      const area = statsWs.intPtr(i, 4)[0];
-                      if (area < minArea) continue;
+                     for (let i = 1; i < nWs; i++) {
+                       const area = statsWs.intPtr(i, 4)[0];
+                       if (area < minAreaPx) continue;
                       countedLocalWs++;
                     }
                     labelsWs.delete();
@@ -351,7 +359,7 @@ export default function Home() {
                 const idxs: number[] = [];
                   for (let i = 1; i < n; i++) {
                     const area = stats.intPtr(i, 4)[0];
-                    if (area < minArea) continue;
+                    if (area < minAreaPx) continue;
                   idxs.push(i);
                 }
                 let counted = idxs.length;
@@ -493,9 +501,9 @@ export default function Home() {
                           const centsWs = new cv.Mat();
                           const nWs = cv.connectedComponentsWithStats(maskedInnerWs, labelsWs, statsWs, centsWs, 8, cv.CV_32S);
                           let countedLocalWs = 0;
-                          for (let i = 1; i < nWs; i++) {
+                         for (let i = 1; i < nWs; i++) {
                             const area = statsWs.intPtr(i, 4)[0];
-                            if (area < minArea) continue;
+                            if (area < minAreaPx) continue;
                             countedLocalWs++;
                           }
                           labelsWs.delete();
@@ -532,7 +540,7 @@ export default function Home() {
                     const idxs: number[] = [];
                     for (let i = 1; i < n; i++) {
                       const area = stats.intPtr(i, 4)[0];
-                      if (area < minArea) continue;
+                      if (area < minAreaPx) continue;
                       idxs.push(i);
                     }
                     let counted = idxs.length;
@@ -685,65 +693,99 @@ export default function Home() {
       let toLabel = opened;
       let owned = false;
       if (useWatershed) {
-        const dist = new cv.Mat();
-        cv.distanceTransform(opened, dist, cvDistConst(cv, distType), distMask);
-        const distNorm = new cv.Mat();
-        cv.normalize(dist, distNorm, 0, 1.0, cv.NORM_MINMAX);
-        const dist8u = new cv.Mat(distNorm.rows, distNorm.cols, cv.CV_8UC1);
-        for (let y = 0; y < distNorm.rows; y++) {
-          for (let x = 0; x < distNorm.cols; x++) {
-            const v = distNorm.floatPtr(y, x)[0];
-            dist8u.ucharPtr(y, x)[0] = Math.max(0, Math.min(255, Math.round(v * 255)));
+        let markers: any | null = null;
+        if (wsMarkerMode === "erode") {
+          // Erosion-based seed extraction
+          const kSize = ensureOdd(clamp(erodeKernelSize, 1, 31));
+          const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(kSize, kSize));
+          const iters = clamp(erodeIterations, 1, 10);
+          let seed = opened.clone();
+          for (let t = 0; t < iters; t++) {
+            const next = new cv.Mat();
+            cv.erode(seed, next, k);
+            seed.delete();
+            seed = next;
           }
-        }
-        const dilK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-        const dilated = new cv.Mat();
-        cv.dilate(dist8u, dilated, dilK);
-        const diff = new cv.Mat();
-        cv.absdiff(dist8u, dilated, diff);
-        const peaks = new cv.Mat();
-        cv.threshold(diff, peaks, 0, 255, cv.THRESH_BINARY_INV);
-        const alpha = 0.02 + splitStrength * 0.38;
-        const t255 = dtThreshMode === "absolute" ? dtThreshAbs : Math.max(0, Math.min(255, Math.round(alpha * 255)));
-        const fg = new cv.Mat();
-        cv.threshold(dist8u, fg, t255, 255, cv.THRESH_BINARY);
-        cv.bitwise_and(peaks, fg, peaks);
-        const pkSize = ensureOdd(clamp(peakCleanupSize, 1, 7));
-        let peaksClean = new cv.Mat();
-        if (pkSize >= 3) {
-          const pkK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(pkSize, pkSize));
-          cv.morphologyEx(peaks, peaksClean, cv.MORPH_OPEN, pkK);
-          pkK.delete();
+          k.delete();
+          // optional cleanup with small opening to break thin bridges
+          const clean = new cv.Mat();
+          const smallK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
+          cv.morphologyEx(seed, clean, cv.MORPH_OPEN, smallK);
+          smallK.delete();
+          markers = new cv.Mat();
+          cv.connectedComponentsWithStats(clean, markers, new cv.Mat(), new cv.Mat(), 8, cv.CV_32S);
+          seed.delete();
+          clean.delete();
         } else {
-          peaksClean = peaks.clone();
+          // Distance-transform based seeds (existing path)
+          const dist = new cv.Mat();
+          cv.distanceTransform(opened, dist, cvDistConst(cv, distType), distMask);
+          const distNorm = new cv.Mat();
+          cv.normalize(dist, distNorm, 0, 1.0, cv.NORM_MINMAX);
+          const dist8u = new cv.Mat(distNorm.rows, distNorm.cols, cv.CV_8UC1);
+          for (let y = 0; y < distNorm.rows; y++) {
+            for (let x = 0; x < distNorm.cols; x++) {
+              const v = distNorm.floatPtr(y, x)[0];
+              dist8u.ucharPtr(y, x)[0] = Math.max(0, Math.min(255, Math.round(v * 255)));
+            }
+          }
+          const dilK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+          const dilated = new cv.Mat();
+          cv.dilate(dist8u, dilated, dilK);
+          const diff = new cv.Mat();
+          cv.absdiff(dist8u, dilated, diff);
+          const peaks = new cv.Mat();
+          cv.threshold(diff, peaks, 0, 255, cv.THRESH_BINARY_INV);
+          const alpha = 0.02 + splitStrength * 0.38;
+          const t255 = dtThreshMode === "absolute" ? dtThreshAbs : Math.max(0, Math.min(255, Math.round(alpha * 255)));
+          const fg = new cv.Mat();
+          cv.threshold(dist8u, fg, t255, 255, cv.THRESH_BINARY);
+          cv.bitwise_and(peaks, fg, peaks);
+          const pkSize = ensureOdd(clamp(peakCleanupSize, 1, 7));
+          let peaksClean = new cv.Mat();
+          if (pkSize >= 3) {
+            const pkK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(pkSize, pkSize));
+            cv.morphologyEx(peaks, peaksClean, cv.MORPH_OPEN, pkK);
+            pkK.delete();
+          } else {
+            peaksClean = peaks.clone();
+          }
+          markers = new cv.Mat();
+          cv.connectedComponentsWithStats(peaksClean, markers, new cv.Mat(), new cv.Mat(), 8, cv.CV_32S);
+          dist.delete();
+          distNorm.delete();
+          dist8u.delete();
+          dilK.delete();
+          dilated.delete();
+          diff.delete();
+          peaks.delete();
+          peaksClean.delete();
+          fg.delete();
         }
-        const markers = new cv.Mat();
-        cv.connectedComponentsWithStats(peaksClean, markers, new cv.Mat(), new cv.Mat(), 8, cv.CV_32S);
+
         const rgb = new cv.Mat();
         cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
-        cv.watershed(rgb, markers);
+        cv.watershed(rgb, markers as any);
         rgb.delete();
-        const separated = new cv.Mat(markers.rows, markers.cols, cv.CV_8UC1);
-        for (let y = 0; y < markers.rows; y++) {
-          for (let x = 0; x < markers.cols; x++) {
-            const label = markers.intPtr(y, x)[0];
+        const _markers = markers as any;
+        const separated = new cv.Mat(_markers.rows, _markers.cols, cv.CV_8UC1);
+        for (let y = 0; y < _markers.rows; y++) {
+          for (let x = 0; x < _markers.cols; x++) {
+            const label = _markers.intPtr(y, x)[0];
             separated.ucharPtr(y, x)[0] = label > 1 ? 255 : 0;
           }
         }
-        toLabel = separated;
+        const separatedFg = new cv.Mat();
+        cv.bitwise_and(separated, opened, separatedFg);
+        toLabel = separatedFg;
         owned = true;
-        dist.delete();
-        distNorm.delete();
-        dist8u.delete();
-        dilK.delete();
-        dilated.delete();
-        diff.delete();
-        peaks.delete();
-        peaksClean.delete();
-        markers.delete();
+        (_markers as { delete: () => void }).delete();
+        separated.delete();
       }
 
       // Count inside inner circle
+      // Map UI minArea scale (0..10) to pixel area threshold
+      const minAreaPx = Math.max(1, Math.round(5 + minArea * minArea * 15));
       const labels = new cv.Mat();
       const stats = new cv.Mat();
       const centroids = new cv.Mat();
@@ -760,7 +802,7 @@ export default function Home() {
       const idxs: number[] = [];
         for (let i = 1; i < numLabels; i++) {
           const area = stats.intPtr(i, 4)[0];
-          if (area < minArea) continue;
+          if (area < minAreaPx) continue;
         idxs.push(i);
       }
 
@@ -796,17 +838,33 @@ export default function Home() {
 
       setColonyCount(acceptedIdxs.length);
 
-      // Draw markers on original
+      // Draw contours efficiently: run findContours once on the inner mask and keep only accepted labels
       const markColor = new cv.Scalar(0, 255, 0, 255);
-      for (const i of acceptedIdxs) {
-          const cx = Math.round(centroids.doublePtr(i, 0)[0]) + roiX;
-          const cy = Math.round(centroids.doublePtr(i, 1)[0]) + roiY;
-        cv.circle(src, { x: cx, y: cy }, 5, markColor, 2);
-        }
-      cv.circle(src, { x: dishCx, y: dishCy }, dishR, new cv.Scalar(255, 128, 0), 3);
-
       const srcRoi = src.roi(roiRect);
+      cv.circle(srcRoi, { x: innerCx, y: innerCy }, effR, new cv.Scalar(255, 128, 0), 2);
+
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      // Contours on the binary inner mask that we actually count on
+      cv.findContours(toLabelInner, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      // Build a quick lookup for accepted labels
+      const accepted = new Set<number>(acceptedIdxs);
+
+      // Draw only contours whose interior maps to an accepted label index
+      for (let k = 0; k < contours.size(); k++) {
+        const cnt = contours.get(k);
+        const rect = cv.boundingRect(cnt);
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        const sx = Math.min(toLabelRoi.cols - 1, Math.max(0, rect.x + Math.floor(rect.width / 2)));
+        const sy = Math.min(toLabelRoi.rows - 1, Math.max(0, rect.y + Math.floor(rect.height / 2)));
+        const labelAtCenter = labels.intPtr(sy + 0, sx + 0)[0];
+        if (!accepted.has(labelAtCenter)) continue;
+        cv.drawContours(srcRoi, contours, k, markColor, 2);
+      }
       cv.imshow(canvasEl, srcRoi);
+      hierarchy.delete();
+      contours.delete();
       srcRoi.delete();
 
       src.delete();
@@ -873,8 +931,8 @@ export default function Home() {
           <div className="space-y-6">
             <div className="space-y-2">
               <p className="text-sm font-semibold">基本</p>
-              <label className="text-sm block">最小面積：{minArea}
-                <input type="range" min={1} max={500} step={1} value={minArea} onChange={(e) => setMinArea(parseInt(e.target.value))} className="w-full" />
+              <label className="text-sm block">最小面積（尺度）：{minArea.toFixed(1)}
+                <input type="range" min={0} max={10} step={0.1} value={minArea} onChange={(e) => setMinArea(parseFloat(e.target.value))} className="w-full" />
               </label>
               <label className="text-sm block">有效半徑比例（%）：{effectiveRadiusPct}
                 <input type="range" min={50} max={100} step={1} value={effectiveRadiusPct} onChange={(e) => setEffectiveRadiusPct(parseInt(e.target.value))} className="w-full" />
@@ -944,6 +1002,25 @@ export default function Home() {
               </label>
               {useWatershed && (
                 <>
+                  <div className="space-y-1">
+                    <p className="text-sm">種子策略</p>
+                    <label className="text-sm inline-flex items-center gap-2 mr-3">
+                      <input type="radio" name="wsmark" checked={wsMarkerMode === "erode"} onChange={() => setWsMarkerMode("erode")} /> 腐蝕種子（快）
+                    </label>
+                    <label className="text-sm inline-flex items-center gap-2">
+                      <input type="radio" name="wsmark" checked={wsMarkerMode === "dt"} onChange={() => setWsMarkerMode("dt")} /> 距離變換種子（精細）
+                    </label>
+                  </div>
+                  {wsMarkerMode === "erode" && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="text-sm block">腐蝕核大小（奇數）：{erodeKernelSize}
+                        <input type="range" min={1} max={31} step={2} value={erodeKernelSize} onChange={(e) => setErodeKernelSize(parseInt(e.target.value))} className="w-full" />
+                      </label>
+                      <label className="text-sm block">腐蝕次數：{erodeIterations}
+                        <input type="range" min={1} max={10} step={1} value={erodeIterations} onChange={(e) => setErodeIterations(parseInt(e.target.value))} className="w-full" />
+                      </label>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     <label className="text-sm block">距離類型
                       <select className="border rounded px-2 py-1 w-full" value={distType} onChange={(e) => setDistType(e.target.value as DistType)}>
