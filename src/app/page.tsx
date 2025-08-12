@@ -11,6 +11,7 @@ type DistType = "L1" | "L2" | "C";
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewRef = useRef<HTMLImageElement | null>(null);
 
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
@@ -985,6 +986,18 @@ export default function Home() {
         cv.drawContours(srcRoi, contours, k, markColor, 2);
       }
       cv.imshow(canvasEl, srcRoi);
+      // Show mask (binary used for labeling) in separate canvas within ROI
+      const maskCanvas = maskCanvasRef.current;
+      if (maskCanvas) {
+        const vis = new cv.Mat();
+        // Ensure we show the same ROI of the labeling mask
+        const maskVis = toLabelInner.clone();
+        cv.cvtColor(maskVis, vis, cv.COLOR_GRAY2RGBA);
+        const visRoi = vis; // already aligned to ROI
+        cv.imshow(maskCanvas, visRoi);
+        maskVis.delete();
+        vis.delete();
+      }
       hierarchy.delete();
       contours.delete();
       srcRoi.delete();
@@ -1210,7 +1223,7 @@ export default function Home() {
         </aside>
 
         <section className="flex-1 min-w-0 min-h-0 p-2 overflow-hidden">
-          <div className="w-full h-full grid grid-cols-2 grid-rows-1 gap-2">
+          <div className="w-full h-full grid grid-cols-3 grid-rows-1 gap-2">
             <div className="border rounded overflow-hidden flex flex-col">
               <div className="px-2 py-1 border-b text-xs font-medium">輸入</div>
               <div className="flex-1 min-h-0 media-box bg-[color:var(--background)]">
@@ -1225,9 +1238,11 @@ export default function Home() {
                       const img = previewRef.current;
                       const canvas = canvasRef.current;
                       if (img) {
-                        const w = img.naturalWidth;
-                        const h = img.naturalHeight;
-                        if (canvas) { canvas.width = w; canvas.height = h; }
+                         const w = img.naturalWidth;
+                         const h = img.naturalHeight;
+                         if (canvas) { canvas.width = w; canvas.height = h; }
+                         const maskCanvas = maskCanvasRef.current;
+                         if (maskCanvas) { maskCanvas.width = w; maskCanvas.height = h; }
                       }
                     }}
                   />
@@ -1241,6 +1256,13 @@ export default function Home() {
               <div className="px-2 py-1 border-b text-xs font-medium">最終結果</div>
               <div className="flex-1 min-h-0 media-box bg-[color:var(--background)]">
                 <canvas ref={canvasRef} />
+              </div>
+            </div>
+
+            <div className="border rounded overflow-hidden flex flex-col">
+              <div className="px-2 py-1 border-b text-xs font-medium">二值化遮罩</div>
+              <div className="flex-1 min-h-0 media-box bg-[color:var(--background)]">
+                <canvas ref={maskCanvasRef} />
               </div>
             </div>
           </div>
