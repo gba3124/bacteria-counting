@@ -9,6 +9,7 @@ declare class Mat {
   floatPtr(row: number, col: number): Float32Array;
   ucharPtr(row: number, col: number): Uint8Array;
   clone(): Mat;
+  copyTo(dst: Mat): void;
   // OpenCV.js supports ROI via Mat.roi(Rect)
   roi(rect: Rect): Mat;
 }

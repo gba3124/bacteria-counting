@@ -38,7 +38,7 @@ export default function Home() {
   const [dtThreshAbs, setDtThreshAbs] = useState<number>(100); // 0..255
   const [peakCleanupSize, setPeakCleanupSize] = useState<number>(1); // odd 1..7
   // Watershed marker strategy
-  const [wsMarkerMode, setWsMarkerMode] = useState<"dt" | "erode">("erode");
+  const [wsMarkerMode, setWsMarkerMode] = useState<"dt" | "erode" | "hybrid">("erode");
   const [erodeKernelSize, setErodeKernelSize] = useState<number>(5); // odd
   const [erodeIterations, setErodeIterations] = useState<number>(2); // 1..10
 
@@ -693,7 +693,7 @@ export default function Home() {
       let toLabel = opened;
       let owned = false;
       if (useWatershed) {
-        let markers: any | null = null;
+        let markers: ReturnType<typeof cv.imread> | null = null;
         if (wsMarkerMode === "erode") {
           // Erosion-based seed extraction
           const kSize = ensureOdd(clamp(erodeKernelSize, 1, 31));
@@ -716,7 +716,7 @@ export default function Home() {
           cv.connectedComponentsWithStats(clean, markers, new cv.Mat(), new cv.Mat(), 8, cv.CV_32S);
           seed.delete();
           clean.delete();
-        } else {
+        } else if (wsMarkerMode === "dt") {
           // Distance-transform based seeds (existing path)
           const dist = new cv.Mat();
           cv.distanceTransform(opened, dist, cvDistConst(cv, distType), distMask);
@@ -736,19 +736,59 @@ export default function Home() {
           cv.absdiff(dist8u, dilated, diff);
           const peaks = new cv.Mat();
           cv.threshold(diff, peaks, 0, 255, cv.THRESH_BINARY_INV);
-          const alpha = 0.02 + splitStrength * 0.38;
-          const t255 = dtThreshMode === "absolute" ? dtThreshAbs : Math.max(0, Math.min(255, Math.round(alpha * 255)));
-          const fg = new cv.Mat();
-          cv.threshold(dist8u, fg, t255, 255, cv.THRESH_BINARY);
-          cv.bitwise_and(peaks, fg, peaks);
           const pkSize = ensureOdd(clamp(peakCleanupSize, 1, 7));
           let peaksClean = new cv.Mat();
-          if (pkSize >= 3) {
-            const pkK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(pkSize, pkSize));
-            cv.morphologyEx(peaks, peaksClean, cv.MORPH_OPEN, pkK);
-            pkK.delete();
+          if (dtThreshMode === "absolute") {
+            const t255 = clamp(dtThreshAbs, 0, 255);
+            const fg = new cv.Mat();
+            cv.threshold(dist8u, fg, t255, 255, cv.THRESH_BINARY);
+            cv.bitwise_and(peaks, fg, peaks);
+            if (pkSize >= 3) {
+              const pkK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(pkSize, pkSize));
+              cv.morphologyEx(peaks, peaksClean, cv.MORPH_OPEN, pkK);
+              pkK.delete();
+            } else {
+              peaksClean = peaks.clone();
+            }
+            fg.delete();
           } else {
-            peaksClean = peaks.clone();
+            // Relative mode: per-component dynamic threshold on distance maxima
+            const labelsOpen = new cv.Mat();
+            const statsOpen = new cv.Mat();
+            const centsOpen = new cv.Mat();
+            const numOpenLabels = cv.connectedComponentsWithStats(opened, labelsOpen, statsOpen, centsOpen, 8, cv.CV_32S);
+            const compMax: number[] = new Array(Math.max(1, numOpenLabels)).fill(0);
+            for (let y = 0; y < opened.rows; y++) {
+              for (let x = 0; x < opened.cols; x++) {
+                if (opened.ucharPtr(y, x)[0] === 0) continue;
+                const l = labelsOpen.intPtr(y, x)[0];
+                const d = dist.floatPtr(y, x)[0];
+                if (d > compMax[l]) compMax[l] = d;
+              }
+            }
+            const alphaRel = 0.2 + splitStrength * 0.5; // 0.2..0.7 of per-blob max
+            const refined = peaks.clone();
+            for (let y = 0; y < refined.rows; y++) {
+              for (let x = 0; x < refined.cols; x++) {
+                if (refined.ucharPtr(y, x)[0] === 0) continue;
+                const l = labelsOpen.intPtr(y, x)[0];
+                if (l <= 0) { refined.ucharPtr(y, x)[0] = 0; continue; }
+                const d = dist.floatPtr(y, x)[0];
+                const t = compMax[l] * alphaRel;
+                if (d < t) refined.ucharPtr(y, x)[0] = 0;
+              }
+            }
+            if (pkSize >= 3) {
+              const pkK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(pkSize, pkSize));
+              cv.morphologyEx(refined, peaksClean, cv.MORPH_OPEN, pkK);
+              pkK.delete();
+            } else {
+              peaksClean = refined.clone();
+            }
+            refined.delete();
+            labelsOpen.delete();
+            statsOpen.delete();
+            centsOpen.delete();
           }
           markers = new cv.Mat();
           cv.connectedComponentsWithStats(peaksClean, markers, new cv.Mat(), new cv.Mat(), 8, cv.CV_32S);
@@ -760,14 +800,82 @@ export default function Home() {
           diff.delete();
           peaks.delete();
           peaksClean.delete();
+        } else {
+          // Hybrid: union of erosion-seeds and DT-seeds
+          // Erode path
+          const kSize = ensureOdd(clamp(erodeKernelSize, 1, 31));
+          const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(kSize, kSize));
+          const iters = clamp(erodeIterations, 1, 10);
+          let seed = opened.clone();
+          for (let t = 0; t < iters; t++) {
+            const next = new cv.Mat();
+            cv.erode(seed, next, k);
+            seed.delete();
+            seed = next;
+          }
+          const cleanE = new cv.Mat();
+          const smallK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
+          cv.morphologyEx(seed, cleanE, cv.MORPH_OPEN, smallK);
+          smallK.delete();
+          k.delete();
+          seed.delete();
+
+          // DT path (reuse the DT recipe above, absolute mode for stability)
+          const dist = new cv.Mat();
+          cv.distanceTransform(opened, dist, cvDistConst(cv, distType), distMask);
+          const distNorm = new cv.Mat();
+          cv.normalize(dist, distNorm, 0, 1.0, cv.NORM_MINMAX);
+          const dist8u = new cv.Mat(distNorm.rows, distNorm.cols, cv.CV_8UC1);
+          for (let y = 0; y < distNorm.rows; y++) {
+            for (let x = 0; x < distNorm.cols; x++) {
+              const v = distNorm.floatPtr(y, x)[0];
+              dist8u.ucharPtr(y, x)[0] = Math.max(0, Math.min(255, Math.round(v * 255)));
+            }
+          }
+          const dilK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+          const dilated = new cv.Mat();
+          cv.dilate(dist8u, dilated, dilK);
+          const diff = new cv.Mat();
+          cv.absdiff(dist8u, dilated, diff);
+          const peaks = new cv.Mat();
+          cv.threshold(diff, peaks, 0, 255, cv.THRESH_BINARY_INV);
+          const t255 = clamp(dtThreshAbs, 0, 255);
+          const fg = new cv.Mat();
+          cv.threshold(dist8u, fg, t255, 255, cv.THRESH_BINARY);
+          cv.bitwise_and(peaks, fg, peaks);
+          const pkSize = ensureOdd(clamp(peakCleanupSize, 1, 7));
+          const cleanD = new cv.Mat();
+          if (pkSize >= 3) {
+            const pkK = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(pkSize, pkSize));
+            cv.morphologyEx(peaks, cleanD, cv.MORPH_OPEN, pkK);
+            pkK.delete();
+          } else {
+            peaks.copyTo(cleanD);
+          }
+
+          // Union seeds
+          const union = new cv.Mat();
+          cv.bitwise_or(cleanE, cleanD, union);
+          cleanE.delete();
+          cleanD.delete();
           fg.delete();
+          peaks.delete();
+          diff.delete();
+          dilated.delete();
+          dist8u.delete();
+          distNorm.delete();
+          dist.delete();
+
+          markers = new cv.Mat();
+          cv.connectedComponentsWithStats(union, markers, new cv.Mat(), new cv.Mat(), 8, cv.CV_32S);
+          union.delete();
         }
 
         const rgb = new cv.Mat();
         cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
-        cv.watershed(rgb, markers as any);
+        cv.watershed(rgb, markers!);
         rgb.delete();
-        const _markers = markers as any;
+        const _markers = markers!;
         const separated = new cv.Mat(_markers.rows, _markers.cols, cv.CV_8UC1);
         for (let y = 0; y < _markers.rows; y++) {
           for (let x = 0; x < _markers.cols; x++) {
@@ -779,7 +887,7 @@ export default function Home() {
         cv.bitwise_and(separated, opened, separatedFg);
         toLabel = separatedFg;
         owned = true;
-        (_markers as { delete: () => void }).delete();
+        _markers.delete();
         separated.delete();
       }
 
